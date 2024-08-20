@@ -1,5 +1,6 @@
 mod generate;
 mod init;
+mod serve;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -20,6 +21,8 @@ enum Commands {
     Init(init::InitArgs),
     #[command(about = "Runs all generators in the baml_src directory")]
     Generate(generate::GenerateArgs),
+    #[command(about = "Starts a server that translates LLM responses to BAML responses")]
+    Serve(serve::ServeArgs),
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -62,9 +65,10 @@ pub enum CallerType {
 
 impl RuntimeCli {
     pub fn run(&self, caller_type: CallerType) -> Result<()> {
-        match self.command {
-            Commands::Generate(ref args) => args.run(caller_type),
-            Commands::Init(ref args) => args.run(caller_type),
+        match &self.command {
+            Commands::Generate(args) => args.run(caller_type),
+            Commands::Init(args) => args.run(caller_type),
+            Commands::Serve(args) => args.run(),
         }
     }
 }

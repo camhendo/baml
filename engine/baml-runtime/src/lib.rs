@@ -32,8 +32,8 @@ use baml_types::BamlMap;
 use baml_types::BamlValue;
 use client_registry::ClientRegistry;
 use indexmap::IndexMap;
+use internal_baml_core::configuration::Generator;
 use internal_baml_core::configuration::GeneratorOutputType;
-use internal_core::configuration::Generator;
 use on_log_event::LogEventCallbackSync;
 use runtime::InternalBamlRuntime;
 
@@ -53,9 +53,6 @@ use clap::Parser;
 pub use internal_baml_jinja::{ChatMessagePart, RenderedPrompt};
 #[cfg(feature = "internal")]
 pub use runtime_interface::InternalRuntimeInterface;
-
-#[cfg(feature = "internal")]
-pub use internal_baml_core as internal_core;
 
 #[cfg(not(feature = "internal"))]
 pub(crate) use internal_baml_jinja::{ChatMessagePart, RenderedPrompt};
