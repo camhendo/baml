@@ -8,11 +8,11 @@ use internal_baml_core::{
     internal_baml_parser_database::walkers::FunctionWalker,
     ir::{
         repr::{Function, IntermediateRepr, Node, Walker},
-        ClassWalker, IRHelper,
+        ClassWalker, EnumWalker, IRHelper,
     },
 };
 use serde::Serialize;
-use serde_json::value::Index;
+use serde_json::{json, value::Index};
 
 use crate::dir_writer::{FileCollector, LanguageFeatures};
 
@@ -37,25 +37,23 @@ impl LanguageFeatures for OpenApiLanguageFeatures {
 
 #[derive(Serialize)]
 struct OpenApiSchema<'ir> {
+    /// Always "3.0.0"
+    openapi: String,
+    info: serde_json::Value,
     paths: IndexMap<String, IndexMap<String, OpenApiMethodDef<'ir>>>,
     // TODO: attach BamlImage and BamlAudio here
-    schemas: IndexMap<&'ir str, OpenApiClassDef<'ir>>,
+    components: OpenApiComponents<'ir>,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+struct OpenApiComponents<'ir> {
+    schemas: IndexMap<&'ir str, OpenApiSymbolDef<'ir>>,
+}
+
 struct OpenApiMethodDef<'ir> {
+    path: String,
     request_body: OpenApiClassDef<'ir>,
-    /// Example:
-    ///
-    /// ```
-    /// '200':
-    ///   content:
-    ///     application/json:
-    ///     schema:
-    ///       $ref: '#/components/schemas/Pet'
-    /// ```
-    responses: IndexMap<String, IndexMap<String, IndexMap<String, OpenApiType<'ir>>>>,
+    response: OpenApiType<'ir>,
     // requestBody:
     // content:
     //   application/json:
@@ -63,6 +61,43 @@ struct OpenApiMethodDef<'ir> {
     //       $ref: '#/components/schemas/Order'
     // description: order placed for purchasing the pet
     // required: true
+}
+
+/// Example:
+///
+/// ```
+/// '200':
+///   content:
+///     application/json:
+///     schema:
+///       $ref: '#/components/schemas/Pet'
+/// ```
+impl Serialize for OpenApiMethodDef<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> core::result::Result<S::Ok, S::Error> {
+        json!({
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": self.request_body
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Successful operation",
+              "content": {
+                "application/json": {
+                  "schema": self.response
+                }
+              }
+            }
+          }
+        })
+        .serialize(serializer)
+    }
 }
 
 // TODO: required fields or not
@@ -77,7 +112,24 @@ struct OpenApiClassDef<'ir> {
 }
 
 #[derive(Serialize)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(untagged)]
+enum OpenApiSymbolDef<'ir> {
+    Class {
+        // name: &'ir str,
+        // title: String,
+        // description: String,
+        /// 'type' of a Class must always be "object"
+        r#type: String,
+        properties: IndexMap<&'ir str, OpenApiType<'ir>>,
+    },
+    Enum {
+        r#type: String,
+        r#enum: Vec<&'ir str>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
 enum OpenApiType<'ir> {
     Def {
         r#type: &'ir str,
@@ -90,6 +142,7 @@ enum OpenApiType<'ir> {
         items: Box<OpenApiType<'ir>>,
     },
     /// key type must always be "string"
+    #[serde(rename_all = "camelCase")]
     Map {
         /// 'type' of a Map must always be "object"
         r#type: String,
@@ -97,12 +150,12 @@ enum OpenApiType<'ir> {
         additional_properties: Box<OpenApiType<'ir>>,
     },
     Ref {
+        #[serde(rename = "$ref")]
         r#ref: String,
     },
     /// https://swagger.io/docs/specification/data-models/oneof-anyof-allof-not/
-    Union {
-        any_of: Vec<OpenApiType<'ir>>,
-    },
+    #[serde(rename_all = "camelCase")]
+    Union { any_of: Vec<OpenApiType<'ir>> },
 }
 
 pub(crate) fn generate(
@@ -123,6 +176,12 @@ impl<'ir> TryFrom<(&'ir IntermediateRepr, &'_ crate::GeneratorArgs)> for OpenApi
 
     fn try_from((ir, _): (&'ir IntermediateRepr, &'_ crate::GeneratorArgs)) -> Result<Self> {
         Ok(Self {
+            openapi: "3.0.0".to_string(),
+            info: json!({
+              "description": "baml-cli serve",
+              "version": "0.1.0",
+              "title": "baml-cli serve",
+            }),
             paths: ir
                 .walk_functions()
                 .map(|f| {
@@ -132,10 +191,45 @@ impl<'ir> TryFrom<(&'ir IntermediateRepr, &'_ crate::GeneratorArgs)> for OpenApi
                     Ok((format!("/call/{}", f.name()), methods))
                 })
                 .collect::<Result<_>>()?,
-            schemas: ir
-                .walk_classes()
-                .map(|c| -> Result<(&str, OpenApiClassDef)> { Ok((c.name(), c.try_into()?)) })
+            components: OpenApiComponents {
+                schemas: vec![
+                    (
+                        "BamlImage",
+                        OpenApiSymbolDef::Class {
+                            r#type: "object".to_string(),
+                            properties: vec![(
+                                "base64",
+                                OpenApiType::Def {
+                                    r#type: "string",
+                                    format: None,
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                        },
+                    ),
+                    (
+                        "BamlAudio",
+                        OpenApiSymbolDef::Class {
+                            r#type: "object".to_string(),
+                            properties: vec![(
+                                "base64",
+                                OpenApiType::Def {
+                                    r#type: "string",
+                                    format: None,
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .map(Ok)
+                .chain(ir.walk_enums().map(|e| Ok((e.name(), e.try_into()?))))
+                .chain(ir.walk_classes().map(|c| Ok((c.name(), c.try_into()?))))
                 .collect::<Result<_>>()?,
+            },
         })
     }
 }
@@ -144,19 +238,8 @@ impl<'ir> TryFrom<Walker<'ir, &'ir Node<Function>>> for OpenApiMethodDef<'ir> {
     type Error = anyhow::Error;
 
     fn try_from(value: Walker<'ir, &'ir Node<Function>>) -> Result<Self> {
-        let mut response_type = IndexMap::new();
-        response_type.insert(
-            "schema".to_string(),
-            value.item.elem.output().to_type_ref(value.db)?,
-        );
-
-        let mut content = IndexMap::new();
-        content.insert("application/json".to_string(), response_type);
-
-        let mut responses = IndexMap::new();
-        responses.insert("200".to_string(), content);
-
         Ok(Self {
+            path: format!("/call/{}", value.item.elem.name()),
             request_body: OpenApiClassDef {
                 r#type: "object".to_string(),
                 properties: value
@@ -169,7 +252,51 @@ impl<'ir> TryFrom<Walker<'ir, &'ir Node<Function>>> for OpenApiMethodDef<'ir> {
                     })
                     .collect::<Result<_>>()?,
             },
-            responses,
+            response: value.item.elem.output().to_type_ref(value.db)?,
+        })
+    }
+}
+
+impl<'ir> TryFrom<EnumWalker<'ir>> for OpenApiSymbolDef<'ir> {
+    type Error = anyhow::Error;
+
+    fn try_from(e: EnumWalker<'ir>) -> Result<Self> {
+        Ok(OpenApiSymbolDef::Enum {
+            // name: c.name(),
+            r#type: "string".to_string(),
+            r#enum: e
+                .item
+                .elem
+                .values
+                .iter()
+                .map(|v| v.elem.0.as_str())
+                .collect(),
+        })
+    }
+}
+
+impl<'ir> TryFrom<ClassWalker<'ir>> for OpenApiSymbolDef<'ir> {
+    type Error = anyhow::Error;
+
+    fn try_from(c: ClassWalker<'ir>) -> Result<Self> {
+        Ok(OpenApiSymbolDef::Class {
+            // name: c.name(),
+            r#type: "object".to_string(),
+            properties: c
+                .item
+                .elem
+                .static_fields
+                .iter()
+                .map(|f| -> Result<(&str, OpenApiType)> {
+                    Ok((
+                        f.elem.name.as_str(),
+                        f.elem.r#type.elem.to_type_ref(&c.db).context(format!(
+                            "Failed to convert {} to OpenAPI type",
+                            f.elem.name
+                        ))?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
         })
     }
 }
