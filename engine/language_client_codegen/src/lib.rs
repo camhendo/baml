@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use version_check::{check_version, GeneratorType, VersionCheckMode};
 
 mod dir_writer;
+mod openapi;
 mod python;
 mod ruby;
 mod typescript;
@@ -169,8 +170,9 @@ impl GenerateClient for GeneratorOutputType {
         }
 
         let files = match self {
-            GeneratorOutputType::RubySorbet => ruby::generate(ir, gen),
+            GeneratorOutputType::OpenApi => openapi::generate(ir, gen),
             GeneratorOutputType::PythonPydantic => python::generate(ir, gen),
+            GeneratorOutputType::RubySorbet => ruby::generate(ir, gen),
             GeneratorOutputType::Typescript => typescript::generate(ir, gen),
         }?;
 

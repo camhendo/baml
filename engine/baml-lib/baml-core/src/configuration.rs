@@ -21,6 +21,8 @@ impl Configuration {
 
 #[derive(Debug, Clone, strum::Display, strum::EnumString, strum::VariantNames)]
 pub enum GeneratorOutputType {
+    #[strum(serialize = "openapi")]
+    OpenApi,
     #[strum(serialize = "python/pydantic")]
     PythonPydantic,
     #[strum(serialize = "typescript")]
@@ -32,6 +34,7 @@ pub enum GeneratorOutputType {
 impl GeneratorOutputType {
     pub fn default_client_mode(&self) -> GeneratorDefaultClientMode {
         match self {
+            Self::OpenApi => GeneratorDefaultClientMode::Sync,
             // Due to legacy reasons, PythonPydantic and Typescript default to async
             // DO NOT CHANGE THIS DEFAULT EVER OR YOU WILL BREAK EXISTING USERS
             Self::PythonPydantic => GeneratorDefaultClientMode::Async,
@@ -43,6 +46,7 @@ impl GeneratorOutputType {
     /// Used to new generators when they are created (e.g. during baml-cli init)
     pub fn recommended_default_client_mode(&self) -> GeneratorDefaultClientMode {
         match self {
+            Self::OpenApi => GeneratorDefaultClientMode::Sync,
             Self::PythonPydantic => GeneratorDefaultClientMode::Sync,
             Self::Typescript => GeneratorDefaultClientMode::Async,
             Self::RubySorbet => GeneratorDefaultClientMode::Sync,

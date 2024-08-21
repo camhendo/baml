@@ -73,6 +73,10 @@ impl GenerateArgs {
             let client_type = caller_type.into();
 
             let default_client_mode = match client_type {
+                internal_baml_core::configuration::GeneratorOutputType::OpenApi => {
+                    // this has no meaning
+                    GeneratorDefaultClientMode::Sync
+                }
                 internal_baml_core::configuration::GeneratorOutputType::PythonPydantic => {
                     // TODO: Consider changing this default to sync
                     GeneratorDefaultClientMode::Async
@@ -81,6 +85,7 @@ impl GenerateArgs {
                     GeneratorDefaultClientMode::Async
                 }
                 internal_baml_core::configuration::GeneratorOutputType::RubySorbet => {
+                    // this has no meaning
                     GeneratorDefaultClientMode::Sync
                 }
             };

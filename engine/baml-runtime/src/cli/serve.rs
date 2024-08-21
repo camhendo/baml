@@ -186,12 +186,6 @@ impl Server {
         let event_stream = EventStream { receiver };
 
         Box::pin(event_stream)
-
-        // use tokio_stream::StreamExt;
-        // Box::pin(
-        //     futures::stream::iter(std::iter::repeat(Message { msg }).take(10))
-        //         .throttle(std::time::Duration::from_secs(1)),
-        // )
     }
 
     async fn baml_stream_axum(

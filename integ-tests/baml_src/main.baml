@@ -15,3 +15,9 @@ generator lang_ruby {
   output_dir "../ruby"
   version "0.53.1"
 }
+
+generator lang_openapi {
+  output_type openapi
+  output_dir "../openapi"
+  version "0.53.1"
+}

@@ -85,6 +85,7 @@ pub fn check_version(
             )
         } else {
             let update_instruction = match generator_language {
+                GeneratorOutputType::OpenApi => unimplemented!("OpenApi not supported yet"),
                 GeneratorOutputType::PythonPydantic => format!("pip install --upgrade baml-py=={}", gen_version),
                 GeneratorOutputType::Typescript => format!("npm install --save-dev @boundaryml/baml@{}", gen_version),
                 GeneratorOutputType::RubySorbet => format!("gem install baml -v {}", gen_version),
