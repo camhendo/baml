@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use baml_types::{BamlMediaType, FieldType, TypeValue};
 use indexmap::IndexMap;
 use internal_baml_core::{
     configuration::GeneratorDefaultClientMode,
-    ir::{repr::IntermediateRepr, FieldType, IRHelper},
+    internal_baml_parser_database::walkers::FunctionWalker,
+    ir::{
+        repr::{Function, IntermediateRepr, Node, Walker},
+        ClassWalker, IRHelper,
+    },
 };
 use serde::Serialize;
+use serde_json::value::Index;
 
 use crate::dir_writer::{FileCollector, LanguageFeatures};
 
@@ -30,14 +36,26 @@ impl LanguageFeatures for OpenApiLanguageFeatures {
 }
 
 #[derive(Serialize)]
-struct OpenApiSchema {
-    paths: IndexMap<String, IndexMap<String, OpenApiMethodDef>>,
-    schemas: IndexMap<String, OpenApiClassDef>,
+struct OpenApiSchema<'ir> {
+    paths: IndexMap<String, IndexMap<String, OpenApiMethodDef<'ir>>>,
+    // TODO: attach BamlImage and BamlAudio here
+    schemas: IndexMap<&'ir str, OpenApiClassDef<'ir>>,
 }
 
 #[derive(Serialize)]
-struct OpenApiMethodDef {
-    requestBody: String,
+#[serde(rename_all = "camelCase")]
+struct OpenApiMethodDef<'ir> {
+    request_body: OpenApiClassDef<'ir>,
+    /// Example:
+    ///
+    /// ```
+    /// '200':
+    ///   content:
+    ///     application/json:
+    ///     schema:
+    ///       $ref: '#/components/schemas/Pet'
+    /// ```
+    responses: IndexMap<String, IndexMap<String, IndexMap<String, OpenApiType<'ir>>>>,
     // requestBody:
     // content:
     //   application/json:
@@ -47,19 +65,44 @@ struct OpenApiMethodDef {
     // required: true
 }
 
+// TODO: required fields or not
 #[derive(Serialize)]
-struct OpenApiClassDef {
-    name: String,
-    title: String,
-    description: String,
+struct OpenApiClassDef<'ir> {
+    // name: &'ir str,
+    // title: String,
+    // description: String,
+    /// 'type' of a Class must always be "object"
     r#type: String,
-    properties: IndexMap<String, OpenApiTypeDef>,
+    properties: IndexMap<&'ir str, OpenApiType<'ir>>,
 }
 
 #[derive(Serialize)]
-struct OpenApiTypeDef {
-    r#type: String,
-    format: String,
+#[serde(untagged, rename_all = "camelCase")]
+enum OpenApiType<'ir> {
+    Def {
+        r#type: &'ir str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<&'ir str>,
+    },
+    Array {
+        /// 'type' of an Array must always be "array"
+        r#type: String,
+        items: Box<OpenApiType<'ir>>,
+    },
+    /// key type must always be "string"
+    Map {
+        /// 'type' of a Map must always be "object"
+        r#type: String,
+        /// value type
+        additional_properties: Box<OpenApiType<'ir>>,
+    },
+    Ref {
+        r#ref: String,
+    },
+    /// https://swagger.io/docs/specification/data-models/oneof-anyof-allof-not/
+    Union {
+        any_of: Vec<OpenApiType<'ir>>,
+    },
 }
 
 pub(crate) fn generate(
@@ -68,12 +111,181 @@ pub(crate) fn generate(
 ) -> Result<IndexMap<PathBuf, String>> {
     let mut collector = FileCollector::<OpenApiLanguageFeatures>::new();
 
-    let schema = OpenApiSchema {
-        paths: Default::default(),
-        schemas: Default::default(),
-    };
+    let schema: OpenApiSchema = (ir, generator).try_into()?;
 
     collector.add_file("openapi.yaml", serde_yaml::to_string(&schema)?);
 
     collector.commit(&generator.output_dir())
+}
+
+impl<'ir> TryFrom<(&'ir IntermediateRepr, &'_ crate::GeneratorArgs)> for OpenApiSchema<'ir> {
+    type Error = anyhow::Error;
+
+    fn try_from((ir, _): (&'ir IntermediateRepr, &'_ crate::GeneratorArgs)) -> Result<Self> {
+        Ok(Self {
+            paths: ir
+                .walk_functions()
+                .map(|f| {
+                    let mut methods = IndexMap::new();
+                    methods.insert("post".to_string(), f.try_into()?);
+
+                    Ok((format!("/call/{}", f.name()), methods))
+                })
+                .collect::<Result<_>>()?,
+            schemas: ir
+                .walk_classes()
+                .map(|c| -> Result<(&str, OpenApiClassDef)> { Ok((c.name(), c.try_into()?)) })
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl<'ir> TryFrom<Walker<'ir, &'ir Node<Function>>> for OpenApiMethodDef<'ir> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Walker<'ir, &'ir Node<Function>>) -> Result<Self> {
+        let mut response_type = IndexMap::new();
+        response_type.insert(
+            "schema".to_string(),
+            value.item.elem.output().to_type_ref(value.db)?,
+        );
+
+        let mut content = IndexMap::new();
+        content.insert("application/json".to_string(), response_type);
+
+        let mut responses = IndexMap::new();
+        responses.insert("200".to_string(), content);
+
+        Ok(Self {
+            request_body: OpenApiClassDef {
+                r#type: "object".to_string(),
+                properties: value
+                    .item
+                    .elem
+                    .inputs()
+                    .iter()
+                    .map(|(name, t)| -> Result<(&str, OpenApiType)> {
+                        Ok((name.as_str(), t.to_type_ref(value.db)?))
+                    })
+                    .collect::<Result<_>>()?,
+            },
+            responses,
+        })
+    }
+}
+
+impl<'ir> TryFrom<ClassWalker<'ir>> for OpenApiClassDef<'ir> {
+    type Error = anyhow::Error;
+
+    fn try_from(c: ClassWalker<'ir>) -> Result<Self> {
+        Ok(Self {
+            // name: c.name(),
+            r#type: "object".to_string(),
+            properties: c
+                .item
+                .elem
+                .static_fields
+                .iter()
+                .map(|f| -> Result<(&str, OpenApiType)> {
+                    Ok((
+                        f.elem.name.as_str(),
+                        f.elem.r#type.elem.to_type_ref(&c.db).context(format!(
+                            "Failed to convert {} to OpenAPI type",
+                            f.elem.name
+                        ))?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+trait ToTypeReferenceInTypeDefinition<'ir> {
+    fn to_type_ref(&self, ir: &'ir IntermediateRepr) -> Result<OpenApiType<'ir>>;
+    fn to_partial_type_ref(
+        &self,
+        ir: &'ir IntermediateRepr,
+        wrapped: bool,
+    ) -> Result<OpenApiType<'ir>>;
+}
+
+impl<'ir> ToTypeReferenceInTypeDefinition<'ir> for FieldType {
+    fn to_type_ref(&self, ir: &'ir IntermediateRepr) -> Result<OpenApiType<'ir>> {
+        Ok(match self {
+            FieldType::Enum(name) | FieldType::Class(name) => OpenApiType::Ref {
+                r#ref: format!("#/components/schemas/{}", name),
+            },
+            FieldType::List(inner) => OpenApiType::Array {
+                r#type: "array".to_string(),
+                items: Box::new(inner.to_type_ref(ir)?),
+            },
+            FieldType::Map(key, value) => match **key {
+                FieldType::Primitive(TypeValue::String) => OpenApiType::Map {
+                    r#type: "object".to_string(),
+                    additional_properties: Box::new(value.to_type_ref(ir)?),
+                },
+                _ => anyhow::bail!("BAML<->OpenAPI only supports string keys in maps"),
+            },
+            FieldType::Primitive(inner) => match inner {
+                TypeValue::Bool => OpenApiType::Def {
+                    r#type: "boolean",
+                    format: None,
+                },
+                TypeValue::Float => OpenApiType::Def {
+                    r#type: "number",
+                    format: Some("double"),
+                },
+                TypeValue::Int => OpenApiType::Def {
+                    r#type: "integer",
+                    // TODO: is this desirable? or would we rather just do int32?
+                    format: Some("int64"),
+                },
+                TypeValue::Null => anyhow::bail!("OpenAPI does not support null literals"),
+                TypeValue::String => OpenApiType::Def {
+                    r#type: "string",
+                    format: None,
+                },
+                TypeValue::Media(BamlMediaType::Audio) => OpenApiType::Ref {
+                    r#ref: format!("#/components/schemas/BamlAudio"),
+                },
+                TypeValue::Media(BamlMediaType::Image) => OpenApiType::Ref {
+                    r#ref: format!("#/components/schemas/BamlImage"),
+                },
+            },
+            FieldType::Union(inner) => OpenApiType::Union {
+                any_of: inner
+                    .iter()
+                    .map(|t| t.to_type_ref(ir))
+                    .collect::<Result<_>>()?,
+            },
+            FieldType::Tuple(inner) => {
+                anyhow::bail!("BAML<->OpenAPI tuple support is not implemented")
+            }
+            // TODO: optional is not implemented correctly
+            FieldType::Optional(inner) => inner.to_type_ref(ir)?,
+        })
+    }
+
+    fn to_partial_type_ref(
+        &self,
+        ir: &'ir IntermediateRepr,
+        wrapped: bool,
+    ) -> Result<OpenApiType<'ir>> {
+        Ok(match self {
+            FieldType::Enum(name) => OpenApiType::Def {
+                r#type: "string",
+                format: Some("enum"),
+            },
+            FieldType::Class(name) => OpenApiType::Def {
+                r#type: "string",
+                format: Some("enum"),
+            },
+            FieldType::List(inner) => unimplemented!(),
+            FieldType::Map(key, value) => unimplemented!(),
+            FieldType::Primitive(inner) => unimplemented!(),
+            FieldType::Union(inner) => unimplemented!(),
+            FieldType::Tuple(inner) => unimplemented!(),
+            FieldType::Optional(inner) => unimplemented!(),
+        })
+    }
 }
