@@ -426,8 +426,9 @@ impl PredefinedTypes {
         kwargs: &HashMap<&str, Type>,
     ) -> (Type, Vec<TypeError>) {
         let span = expr.span();
-        let val = self.as_function(func);
-        if val.is_none() {
+        let val = if let Some(v) = self.as_function(func) {
+            v
+        } else {
             return (
                 Type::Unknown,
                 vec![TypeError::new_invalid_type(
@@ -437,23 +438,29 @@ impl PredefinedTypes {
                     span,
                 )],
             );
-        }
-        let (ret, args) = val.unwrap();
+        };
+    
+        let (ret, args) = val;
         let mut errors = Vec::new();
-
-        // Check how many args are required.
+    
+        // Ensure optional arguments are at the end
         let mut optional_args = vec![];
-        for (name, t) in args.iter().rev() {
-            if !t.is_optional() {
-                break;
+        let mut found_non_optional = false;
+        for (name, t) in args.iter() {
+            if t.is_optional() {
+                if found_non_optional {
+                    errors.push(TypeError::new_misplaced_optional_arg(func, span, name));
+                }
+                optional_args.push(name);
+            } else {
+                found_non_optional = true;
             }
-            optional_args.push(name);
         }
         let required_args = args.len() - optional_args.len();
-
-        // Check count
-        if positional_args.len() + kwargs.len() < required_args
-            || (positional_args.len() + kwargs.len()) > args.len()
+    
+        // Check count logic considering optional arguments
+        if positional_args.len() < required_args
+            || positional_args.len() + kwargs.len() > args.len()
         {
             errors.push(TypeError::new_wrong_arg_count(
                 func,
@@ -462,54 +469,67 @@ impl PredefinedTypes {
                 positional_args.len() + kwargs.len(),
             ));
         } else {
-            let mut unused_args = args.iter().map(|(name, _)| name).collect::<HashSet<_>>();
-            // Check types
-            for (i, (name, t)) in args.iter().enumerate() {
-                if i < positional_args.len() {
-                    unused_args.remove(name);
-                    let arg_t = &positional_args[i];
-                    if arg_t != t {
-                        errors.push(TypeError::new_wrong_arg_type(
-                            func,
-                            span,
-                            name,
-                            span.clone(),
-                            t.clone(),
-                            arg_t.clone(),
-                        ));
-                    }
-                } else {
-                    if let Some(arg_t) = kwargs.get(name.as_str()) {
-                        unused_args.remove(name);
-                        if arg_t != t {
-                            errors.push(TypeError::new_wrong_arg_type(
-                                func,
-                                span,
-                                name,
-                                span.clone(),
-                                t.clone(),
-                                arg_t.clone(),
-                            ));
-                        }
+            let mut unused_args: HashSet<_> = args.iter().map(|(name, _)| name).collect();
+    
+            // Helper function to check argument types
+            let mut check_arg_type = |name: &str, expected: &Type, provided: &Type| {
+                // Helper function to check if a type matches a union
+                fn type_matches_union(expected: &Type, provided: &Type) -> bool {
+                    if let Type::Union(types) = expected {
+                        types.iter().any(|t| t == provided)
                     } else {
-                        if !optional_args.contains(&name) {
-                            errors.push(TypeError::new_missing_arg(func, span, name));
-                        }
+                        expected == provided
                     }
                 }
-            }
 
-            kwargs.iter().for_each(|(name, _)| {
-                if !args.iter().any(|(arg_name, _)| arg_name == name) {
-                    errors.push(TypeError::new_unknown_arg(
+                // Handle optional types and unions
+                let type_matches = match expected {
+                    Type::Optional(inner_type) => {
+                        // Match if the provided type matches the inner type or is None
+                        provided == &Type::None || type_matches_union(inner_type, provided)
+                    }
+                    Type::Union(_) => type_matches_union(expected, provided),
+                    _ => expected == provided,
+                };
+
+                if !type_matches {
+                    errors.push(TypeError::new_wrong_arg_type(
                         func,
                         span,
                         name,
-                        unused_args.clone(),
+                        span.clone(),
+                        expected.clone(),
+                        provided.clone(),
                     ));
                 }
-            });
+            };
+    
+            // Check positional argument types
+            for (i, (name, t)) in args.iter().enumerate() {
+                if i < positional_args.len() {
+                    unused_args.remove(name);
+                    check_arg_type(name, t, &positional_args[i]);
+                }
+            }
+    
+            // Check keyword argument types
+            for (name, t) in args.iter().skip(positional_args.len()) {
+                if let Some(arg_t) = kwargs.get(name.as_str()) {
+                    unused_args.remove(name);
+                    check_arg_type(name, t, arg_t);
+                } else if !optional_args.contains(name) {
+                    errors.push(TypeError::new_missing_arg(func, span, name));
+                }
+            }
+    
+            // Check for unknown keyword arguments
+            for (name, _) in kwargs.iter() {
+                if !args.iter().any(|(arg_name, _)| arg_name == name) {
+                    errors.push(TypeError::new_unknown_arg(func, span, name, unused_args.clone()));
+                }
+            }
         }
+    
         (ret.clone(), errors)
     }
 }
